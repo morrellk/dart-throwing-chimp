@@ -24,6 +24,18 @@
 #  col_types = c("numeric", "text", "numeric", "date", rep("numeric",2), rep("text",3), "numeric", rep("text",2),
 #  rep("numeric",2), rep("text",5), rep("numeric",3), rep("text",2), "numeric")) 
 
+# Modified 21-Mar-2016 by morrellk  
+#    Updated for 2016 -  - required changes to some hardcoded values
+#                        - changed to reading with read_csv (from readr package)
+#                             to accomodate Notes which is now in the historical csv
+#                        - changed from html() to read_html() (html()) deprecated)
+#                        - ensure that get the correct realtime data file (not just Jan)
+#                        - remove renaming of GEO_PRECIS (variable currently same name)
+#                        - remove 5 columns named NA, full of NA's that appeared in realtime data
+#                        - changed left_join(expand(...)) to complete() because 
+#                                  expand() not working as expected
+
+
 # Load required packages
 
 library(rvest)
@@ -32,13 +44,14 @@ library(dplyr)
 library(tidyr)
 library(countrycode)
 library(ggplot2)
+library(readr) # used for read_csv, had trouble with read.csv and notes
 
 # Create function to get zip file and extract csv using vector of two string objects and returning data frame
 
 getfile <- function(vector) {
   temp <- tempfile()
   download.file(vector[1], temp)
-  df <- read.csv(unz(temp, vector[2]), stringsAsFactors=FALSE)
+  df <- read_csv(unz(temp, vector[2]))
   unlink(temp)
   return(df)
 }
@@ -47,18 +60,21 @@ getfile <- function(vector) {
 # Unfortunately, the name of the .csv file in that zip archive is not a direct derivation of the link address, so I am leaving
 # that part hard-coded for now. That means it should work for the rest of 2015, as long as ACLED doesn't rearrange or rename
 # the page, but the script will need to be updated in 2016. This block and the one that follow depend on 'rvest'.
+# 21-Mar-2016 Updated for 2016 data - version and year change, change in urls for 
+#              realtime data.
 
 url <- "http://www.acleddata.com/data/"  # url for acled's data page
-version <- 5  # current version of historical data
-endyear <- 2014  # end year for current version of historical data
+version <- 6  # current version of historical data
+endyear <- 2015  # end year for current version of historical data
 
 # scrape link address for realtime .zip
-realtime.url <- paste0(url, "realtime-data-2015/") %>%  # cobble together url of target page
-  html(.) %>%               # parse the relevant page
+realtime.url <- paste0(url, "realtime-data-2016/") %>%  # cobble together url of target page
+  read_html(.) %>%               # parse the relevant page
   html_nodes("a") %>%       # find all the hyperlinks
   html_attr("href") %>%     # get the urls for those hyperlinks
   str_subset("\\.zip") %>%  # find the urls that end in ".zip"
-  str_subset("ACLED-All-Africa-File_20150101") # pick the one we want, which runs from the start of the year
+  str_subset("ACLED-All-Africa-File_20160101") # pick the one we want, which runs from the start of the year
+realtime.url <- realtime.url[which(!str_detect(realtime.url,"20160131"))]  # discard Jan only
 # build name of realtime file to extract from realtime .zip
 realtime.file <- realtime.url %>% 
   str_split(., "\\/") %>%         # split the url at the forward slashes
@@ -69,21 +85,25 @@ realtime.file <- realtime.url %>%
 
 # scrape link address for past data
 past.url <- paste0(url, sprintf("version-%d-data-1997-%d/", version, endyear)) %>% # cobble together url of target page
-  html(.) %>%               # parse the relevant page
+  read_html(.) %>%               # parse the relevant page
   html_nodes("a") %>%       # find all the hyperlinks
   html_attr("href") %>%     # get the urls for those hyperlinks
   str_subset("\\.zip") %>%  # find the urls that end in ".zip"
-  str_subset("dyadic_Updated") # pick the dyadic one that isn't a shapefile
+  str_subset("dyadic") # pick the dyadic one that isn't a shapefile
 # build name of past file to extract from resulting .zip
-past.file <- sprintf("ACLED-Version-%d-All-Africa-1997-%d_dyadic_Updated_no_notes.csv", version, endyear)
+past.file <- sprintf("ACLED Version %d All Africa 1997-%d_csv_dyadic.csv", version, endyear)
 
 # Fetch and merge the past and current-year files
 
 ACLED.targets <- list(c(past.url, past.file), c(realtime.url, realtime.file)) # Make list of target dataset info
 ACLED.list <- lapply(ACLED.targets, getfile) # Use function created above to ingest files into list form
-names(ACLED.list[[1]]) <- sub("GEO_PRECIS", "GEO_PRECISION", names(ACLED.list[[1]])) # Change name of var in Version 5 to match realtime
 names(ACLED.list[[2]]) <- gsub("ADM_LEVEL_", "ADMIN", names(ACLED.list[[2]])) # Change names of location vars to match Version 5
 ACLED <- Reduce(function(...) merge(..., all=TRUE), ACLED.list) # Merge all files in the list, keeping all non-duplicate rows
+# Realtime file finishing with 5 columns of NA, all named NA - get rid of if there
+n1 <- 1+length(names(ACLED.list[[1]]))
+n2 <- length(names(ACLED.list[[2]]))
+if ((n2 > n1) && (length(unique(ACLED[,n1:n2]))==(n2-n1+1))) 
+     ACLED <- ACLED[,-(n1:n2)]
 names(ACLED) <- tolower(names(ACLED)) # Convert var names in merged file to lower case
 
 # Create country-month summary data frames
@@ -95,7 +115,9 @@ ACLED.cm.types <- ACLED %>%
   group_by(gwno, year, month, event_type) %>%  # Define groupings from highest to lowest level; data are automatically ordered accordingly
   tally(.) %>%  # Get counts of records in each group (i.e., each country/year/month/type subset)
   spread(., key = event_type, value = n, fill = 0) %>% # Make data wide by spreading event types into columns
-  left_join(expand(., gwno, year, month), .) %>% # Expand data frame to cover all possible country-months by left-joining tallies to complete series created with expand() from tidyr
+  #  expand didn't seem to be doing what was expected. Use complete instead, hardcoded end year
+  #left_join(expand(., gwno, year, month), .) %>% # Expand data frame to cover all possible country-months by left-joining tallies to complete series created with expand() from tidyr
+  complete(gwno, year=1997:2016, month=1:12) %>%
   replace(is.na(.), 0) %>%  # Replace all NAs created by that last step with 0s
   mutate(., battles = rowSums(select(., contains("battle")))) %>% # Create vars summing counts of all battle types
   filter(., year < as.numeric(substr(Sys.Date(), 1, 4)) | (year == as.numeric(substr(Sys.Date(), 1, 4)) & month < as.numeric(substr(Sys.Date(), 6, 7)))) %>% # Drop rows for months that haven't happened yet
@@ -106,7 +128,9 @@ ACLED.cm.deaths <- ACLED %>%
   mutate(month = as.numeric(substr(event_date, 4, 5))) %>%  # Create month var to use in grouping
   group_by(gwno, year, month) %>%  # Define groupings from highest to lowest level; data are automatically ordered accordingly
   summarise(., deaths = sum(fatalities, na.rm=TRUE)) %>%  # get monthly death counts
-  left_join(expand(., gwno, year, month), .) %>% # Expand data frame to cover all possible country-months by left-joining sums to complete series created with expand() from tidyr
+  # As above, replace the left_join(expand( )) with complete()
+  #left_join(expand(., gwno, year, month), .) %>% # Expand data frame to cover all possible country-months by left-joining sums to complete series created with expand() from tidyr
+  complete(gwno, year=1997:2016, month=1:12) %>%  
   replace(is.na(.), 0) %>%  # Replace all NAs created by that last step with 0s
   filter(., year < as.numeric(substr(Sys.Date(), 1, 4)) | (year == as.numeric(substr(Sys.Date(), 1, 4)) & month < as.numeric(substr(Sys.Date(), 6, 7)))) %>% # Drop rows for months that haven't happened yet
   mutate(., country = countrycode(gwno, "cown", "country.name", warn = FALSE)) # Use 'countrycode' to add country names based on COW numeric codes
